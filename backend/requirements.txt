@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pillow
+opencv-python
+
+# For SAM (Segment Anything Model)
+torch
+torchvision
+# torchaudio # Often installed with torch, but add if needed for your PyTorch distribution
+git+https://github.com/facebookresearch/segment-anything.git
+
+# For serving static files (like downloaded model checkpoints if we host them)
+# aiofiles # Potentially useful later 
