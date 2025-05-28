@@ -1,12 +1,15 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles # Import StaticFiles
 import shutil
 import os
+import numpy as np # For handling mask data
 from pydantic import BaseModel # For request body validation
-from typing import List
+from typing import List, Any # Any for the raw mask data for now
 
 # Import the SAM service and its loader
-from .services.segmentation_service import load_sam_model, get_image_segmentation_masks, SAM_CHECKPOINT_PATH, MODEL_TYPE, DEVICE
+from .services.segmentation_service import load_sam_model, get_image_segmentation_masks, SAM_CHECKPOINT_PATH, MODEL_TYPE, DEVICE, SAM_PREDICTOR
+from .services.recoloring_service import recolor_segment_hsv, hex_to_hsl # Added recoloring service
 
 # Define the origins that should be allowed to make cross-origin requests.
 # For development, you can allow all origins with "*",
@@ -31,6 +34,9 @@ UPLOAD_DIR = "./uploaded_images"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
+# Mount static files directory
+app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
+
 # --- Pydantic Models for API --- 
 class PointPrompt(BaseModel):
     x: float
@@ -40,6 +46,11 @@ class PointPrompt(BaseModel):
 class SegmentationRequest(BaseModel):
     image_name: str # Filename of the uploaded image
     prompts: List[PointPrompt]
+
+class RecolorRequest(BaseModel):
+    image_name: str
+    mask: List[List[bool]] # Expecting a 2D boolean array for the mask
+    target_hex_color: str
 
 # --- Application Startup Event ---
 @app.on_event("startup")
@@ -108,12 +119,39 @@ async def segment_image_endpoint(request: SegmentationRequest):
         
     return {"image_name": request.image_name, "masks": masks}
 
+@app.post("/recolor-image/")
+async def recolor_image_endpoint(request: RecolorRequest):
+    image_path = os.path.join(UPLOAD_DIR, request.image_name)
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail=f"Image '{request.image_name}' not found for recoloring.")
+
+    try:
+        # Convert the received list of lists of booleans mask to a NumPy array
+        mask_np = np.array(request.mask, dtype=bool)
+        
+        print(f"Recoloring image: {request.image_name} with color {request.target_hex_color}")
+        # The recolor_segment_hsv function overwrites the image and returns its path.
+        modified_image_path = recolor_segment_hsv(image_path, mask_np, request.target_hex_color)
+        
+        return {
+            "message": "Image segment recolored successfully.", 
+            "recolored_image_name": os.path.basename(modified_image_path),
+            "new_color_applied": request.target_hex_color
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e: # Catch potential errors from recolor_segment_hsv like dimension mismatch
+        print(f"ValueError during recoloring: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Unexpected error during recoloring: {e}")
+        # import traceback
+        # traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during recoloring: {str(e)}")
+
 # To run this application:
 # 1. Make sure you are in the 'backend' directory.
 # 2. Create a virtual environment: python -m venv .venv
 # 3. Activate it: source .venv/bin/activate (on Linux/macOS) or .venv\Scripts\activate (on Windows)
 # 4. Install dependencies: pip install -r requirements.txt
 # 5. Run uvicorn: uvicorn app.main:app --reload 
-
-# Need to import SAM_PREDICTOR to check its status in the root endpoint
-from .services.segmentation_service import SAM_PREDICTOR 

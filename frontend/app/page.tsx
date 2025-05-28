@@ -12,6 +12,7 @@ interface Mask {
   area: number;
   id: string; // Changed to string for robust unique IDs (e.g., UUID or timestamp-based)
   color?: string; // For displaying the mask with a specific color
+  promptGroupId?: string; // To associate masks with the prompts that generated them
 }
 
 interface PointPrompt {
@@ -27,19 +28,23 @@ let pointIdCounter = 0;
 export default function HomePage() {
   const [selectedImageFile, setSelectedImageFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [uploadedImageName, setUploadedImageName] = useState<string | null>(null); // Store filename from backend
-  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null); // This will be same as preview for now
+  const [uploadedImageName, setUploadedImageName] = useState<string | null>(null);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSegmenting, setIsSegmenting] = useState<boolean>(false);
+  const [isRecoloring, setIsRecoloring] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [segmentedMasks, setSegmentedMasks] = useState<Mask[]>([]);
+  const [stagingMasks, setStagingMasks] = useState<Mask[]>([]); // For masks pending user selection
+  const [segmentedMasks, setSegmentedMasks] = useState<Mask[]>([]); // Finalized masks
   const [currentPrompts, setCurrentPrompts] = useState<PointPrompt[]>([]);
+  const [currentPromptGroupId, setCurrentPromptGroupId] = useState<string | null>(null); // Store the ID of the current staging group
   const [currentPromptLabel, setCurrentPromptLabel] = useState<0 | 1>(1); // Default to foreground
+  const [hoveredMaskId, setHoveredMaskId] = useState<string | null>(null); // For hover preview
   const [imageDimensions, setImageDimensions] = useState<{width: number, height: number, naturalWidth: number, naturalHeight: number} | null>(null);
 
-  const [selectedColor, setSelectedColor] = useState<string>('#00FF00'); // Default to green, like your screenshot example
+  const [selectedColor, setSelectedColor] = useState<string>('#FF69B4'); // Default to HotPink
   const imageDisplayRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null); // Ref for the actual <img> element
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -47,6 +52,8 @@ export default function HomePage() {
   const resetImageState = () => {
     setUploadedImageUrl(null);
     setUploadedImageName(null);
+    setCurrentPromptGroupId(null); // Reset group ID
+    setStagingMasks([]); 
     setSegmentedMasks([]);
     setCurrentPrompts([]);
     setError(null);
@@ -79,8 +86,9 @@ export default function HomePage() {
     if (event.target.files && event.target.files[0]) {
       const file = event.target.files[0];
       setSelectedImageFile(file);
-      setPreviewUrl(URL.createObjectURL(file));
-      resetImageState(); // Full reset for a new file
+      if (previewUrl) URL.revokeObjectURL(previewUrl); // Revoke old blob URL for small preview
+      setPreviewUrl(URL.createObjectURL(file)); // Set new blob URL for small preview
+      resetImageState(); // Full reset for a new file selection
     }
   };
 
@@ -91,7 +99,8 @@ export default function HomePage() {
       const file = event.dataTransfer.files[0];
       if (file.type.startsWith('image/')) {
         setSelectedImageFile(file);
-        setPreviewUrl(URL.createObjectURL(file));
+        if (previewUrl) URL.revokeObjectURL(previewUrl); // Revoke old blob URL for small preview
+        setPreviewUrl(URL.createObjectURL(file)); // Set new blob URL for small preview
         resetImageState();
       } else {
         setError('Invalid file type. Please upload an image.');
@@ -125,14 +134,23 @@ export default function HomePage() {
       return;
     }
 
+    // Reset relevant states before new upload, but keep selectedFile and its previewUrl
+    setUploadedImageUrl(null);
+    setUploadedImageName(null);
+    setStagingMasks([]);
+    setSegmentedMasks([]);
+    setCurrentPrompts([]);
+    setImageDimensions(null);
+    maskIdCounter = 0;
+    pointIdCounter = 0;
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d');
+      ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+    // The small previewUrl (blob) is already set by handleFileChange/handleDrop
+
     setIsLoading(true);
     setError(null);
-    // If it's a re-upload of the same conceptual image, we might not want to clear everything.
-    // For simplicity now, clicking upload often implies starting fresh with that image file.
-    if (uploadedImageName !== selectedImageFile.name) {
-        resetImageState(); // Full reset if file name is different
-        setPreviewUrl(URL.createObjectURL(selectedImageFile)); // Update preview if it was a new selection
-    }
     
     const formData = new FormData();
     formData.append('file', selectedImageFile);
@@ -145,9 +163,11 @@ export default function HomePage() {
       });
       
       setUploadedImageName(uploadResponse.data.image_name);
-      setUploadedImageUrl(previewUrl); // Use existing preview URL
+      // Construct the server URL for the uploaded image for the main display
+      const serverImageUrl = `http://localhost:8000/uploaded_images/${uploadResponse.data.image_name}`;
+      setUploadedImageUrl(serverImageUrl);
       setError(null);
-      console.log('Image uploaded:', uploadResponse.data.image_name);
+      console.log('Image uploaded:', uploadResponse.data.image_name, 'Serving from:', serverImageUrl);
 
     } catch (err) {
       console.error('Upload error:', err);
@@ -240,7 +260,11 @@ export default function HomePage() {
 
     setIsSegmenting(true);
     setError(null);
+    setStagingMasks([]); // Clear previous staging masks before new request
+
     const pointsForApi = currentPrompts.map(p => ({ x: p.x, y: p.y, label: p.label }));
+    const newPromptGroupId = `prompt-group-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    setCurrentPromptGroupId(newPromptGroupId); // Set the current group ID
 
     try {
       const segmentationResponse = await axios.post('http://localhost:8000/segment-image/', {
@@ -261,14 +285,24 @@ export default function HomePage() {
             });
           });
           const bbox = (minX === Infinity) ? { x: 0, y: 0, width: 0, height: 0 } : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };       
-          maskIdCounter++; // Increment global ID counter
-          return { id: `mask-${Date.now()}-${maskIdCounter}`, segmentation: maskData, bbox: bbox, area: area, color: selectedColor };
+          maskIdCounter++; 
+          return { 
+            id: `mask-${Date.now()}-${maskIdCounter}`,
+            promptGroupId: newPromptGroupId, // Assign group ID from the state
+            segmentation: maskData, 
+            bbox: bbox, 
+            area: area, 
+            // Do not assign selectedColor here, staging masks are neutral until selected/colored
+          };
         }).filter((mask: Mask) => mask.area > 0); 
-        setSegmentedMasks(prevMasks => [...prevMasks, ...newProcessedMasks]);
-        setCurrentPrompts([]); // Clear points after successful segmentation and mask addition
-        pointIdCounter = 0;
-
-        if (newProcessedMasks.length === 0) setError(rawMasks.length > 0 ? "SAM returned masks, but they were all empty/small." : "No new valid masks from points.")
+        
+        if (newProcessedMasks.length > 0) {
+          setStagingMasks(newProcessedMasks);
+          // Don't clear currentPrompts here, user might want to refine them if no good mask is staged
+          // currentPrompts will be cleared when a staging mask is chosen or all are discarded.
+        } else {
+           setError(rawMasks.length > 0 ? "SAM returned masks, but they were all empty/small." : "No masks generated for these points.");
+        }
       } else {
         setError("No masks returned from SAM for these points.");
       }
@@ -280,49 +314,183 @@ export default function HomePage() {
     }
   };
 
-  const handleApiError = (err: any, type: 'upload' | 'segmentation') => {
+  const handleApiError = (err: any, type: 'upload' | 'segmentation' | 'recolor') => {
     if (axios.isAxiosError(err) && err.response) setError(`Error (${type}): ${err.response.status} - ${err.response.data.detail || err.message}`);
     else if (err instanceof Error) setError(`Error (${type}): ${err.message}`);
     else setError(`An unexpected ${type} error occurred.`);
   };
   
   useEffect(() => {
-    if (segmentedMasks.length > 0 && canvasRef.current && imageRef.current && uploadedImageUrl && imageDimensions) {
-      const canvas = canvasRef.current; const ctx = canvas.getContext('2d'); const img = imageRef.current;
-      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-      canvas.style.width = `${img.offsetWidth}px`; canvas.style.height = `${img.offsetHeight}px`;
+    if (canvasRef.current && imageRef.current && uploadedImageUrl && imageDimensions) {
+      const canvas = canvasRef.current; 
+      const ctx = canvas.getContext('2d'); 
+      const img = imageRef.current;
+      const { naturalWidth, naturalHeight } = imageDimensions;
+
+      if (naturalWidth === 0 || naturalHeight === 0) {
+        console.warn("Attempted to draw on canvas with zero dimensions.");
+        return;
+      }
+
+      if (canvas.width !== naturalWidth || canvas.height !== naturalHeight) {
+        canvas.width = naturalWidth;
+        canvas.height = naturalHeight;
+      }
+      const styleWidth = `${img.offsetWidth}px`;
+      const styleHeight = `${img.offsetHeight}px`;
+      if (canvas.style.width !== styleWidth) canvas.style.width = styleWidth;
+      if (canvas.style.height !== styleHeight) canvas.style.height = styleHeight;
+      
       ctx?.clearRect(0,0, canvas.width, canvas.height); 
+
+      // Draw all segmented (finalized) masks first
       segmentedMasks.forEach(mask => {
         if (!ctx) return;
-        const tempCanvas = document.createElement('canvas'); tempCanvas.width = img.naturalWidth; tempCanvas.height = img.naturalHeight;
-        const tempCtx = tempCanvas.getContext('2d'); if (!tempCtx) return;
-        const maskImageData = tempCtx.createImageData(img.naturalWidth, img.naturalHeight);
-        const data = maskImageData.data; const maskColor = hexToRgba(mask.color || selectedColor, 0.5);
-        for (let r = 0; r < img.naturalHeight; r++) {
-          for (let c = 0; c < img.naturalWidth; c++) {
-            const index = (r * img.naturalWidth + c) * 4;
-            if (mask.segmentation[r] && mask.segmentation[r][c]) {
-              data[index] = maskColor.r; data[index + 1] = maskColor.g; data[index + 2] = maskColor.b; data[index + 3] = maskColor.a; 
+        const tempCanvas = document.createElement('canvas'); 
+        tempCanvas.width = naturalWidth; 
+        tempCanvas.height = naturalHeight;
+        const tempCtx = tempCanvas.getContext('2d'); 
+        if (!tempCtx) return;
+
+        const maskImageData = tempCtx.createImageData(naturalWidth, naturalHeight);
+        const data = maskImageData.data; 
+        // Use the mask's own color if it has one (from recoloring), otherwise the global selectedColor for new masks
+        const drawColor = mask.color || selectedColor; 
+        const colorToDraw = hexToRgba(drawColor, 0.5); // Standard opacity for regular masks
+        
+        for (let r = 0; r < naturalHeight; r++) {
+          for (let c = 0; c < naturalWidth; c++) {
+            const index = (r * naturalWidth + c) * 4;
+            if (mask.segmentation && mask.segmentation[r] && mask.segmentation[r][c]) {
+              data[index] = colorToDraw.r; 
+              data[index + 1] = colorToDraw.g; 
+              data[index + 2] = colorToDraw.b; 
+              data[index + 3] = colorToDraw.a; 
             }
           }
         }
-        tempCtx.putImageData(maskImageData, 0, 0); ctx.drawImage(tempCanvas, 0, 0); 
+        tempCtx.putImageData(maskImageData, 0, 0);
+        ctx.drawImage(tempCanvas, 0, 0); 
       });
-    } else if (canvasRef.current && !uploadedImageUrl) {
-        const canvas = canvasRef.current; const ctx = canvas.getContext('2d');
-        ctx?.clearRect(0, 0, canvas.width, canvas.height);
-        // Reset canvas style if no image
-        canvas.style.width = '100%';
-        canvas.style.height = '100%';
-    }
-  }, [segmentedMasks, uploadedImageUrl, selectedColor, imageDimensions]);
 
-  const handleRecolorMask = (maskId: string) => {
-    console.log(`Attempting to recolor mask ${maskId} with ${selectedColor}`);
-    alert(`TODO: Implement recoloring for mask ${maskId} with color ${selectedColor}.\nThis will call a new backend endpoint.`);
-    setSegmentedMasks(prevMasks => 
+      // Draw staging masks if any - with a neutral/default preview color
+      stagingMasks.forEach(mask => {
+        if (!ctx) return;
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = naturalWidth;
+        tempCanvas.height = naturalHeight;
+        const tempCtx = tempCanvas.getContext('2d');
+        if (!tempCtx) return;
+        const maskImageData = tempCtx.createImageData(naturalWidth, naturalHeight);
+        const data = maskImageData.data;
+        const stagingColor = hexToRgba("#808080", 0.4); // Grey for staging masks
+        for (let r = 0; r < naturalHeight; r++) {
+          for (let c = 0; c < naturalWidth; c++) {
+            const index = (r * naturalWidth + c) * 4;
+            if (mask.segmentation && mask.segmentation[r] && mask.segmentation[r][c]) {
+              data[index] = stagingColor.r;
+              data[index + 1] = stagingColor.g;
+              data[index + 2] = stagingColor.b;
+              data[index + 3] = stagingColor.a;
+            }
+          }
+        }
+        tempCtx.putImageData(maskImageData, 0, 0);
+        ctx.drawImage(tempCanvas, 0, 0);
+      });
+
+      // If a mask is being hovered (either staging or finalized), draw it with higher opacity or a distinct preview style
+      if (hoveredMaskId) {
+        const maskToPreview =
+          stagingMasks.find(m => m.id === hoveredMaskId) ||
+          segmentedMasks.find(m => m.id === hoveredMaskId);
+        
+        if (maskToPreview && ctx) {
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = naturalWidth;
+          tempCanvas.height = naturalHeight;
+          const tempCtx = tempCanvas.getContext('2d');
+          if (!tempCtx) return;
+
+          const maskImageData = tempCtx.createImageData(naturalWidth, naturalHeight);
+          const data = maskImageData.data;
+          // Use a distinct preview color/opacity, e.g., yellow with higher opacity
+          const previewColor = hexToRgba("#FFFF00", 0.75); // Yellow preview, slightly more opaque
+
+          for (let r = 0; r < naturalHeight; r++) {
+            for (let c = 0; c < naturalWidth; c++) {
+              const index = (r * naturalWidth + c) * 4;
+              if (maskToPreview.segmentation && maskToPreview.segmentation[r] && maskToPreview.segmentation[r][c]) {
+                data[index] = previewColor.r;
+                data[index + 1] = previewColor.g;
+                data[index + 2] = previewColor.b;
+                data[index + 3] = previewColor.a;
+              }
+            }
+          }
+          tempCtx.putImageData(maskImageData, 0, 0);
+          ctx.drawImage(tempCanvas, 0, 0);
+        }
+      }
+
+    } else if (canvasRef.current && (!uploadedImageUrl || segmentedMasks.length === 0)) { // Clear if no image or no masks
+        const canvas = canvasRef.current; 
+        const ctx = canvas.getContext('2d');
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+        // Optional: Reset canvas style if no image is displayed or no masks
+        // canvas.style.width = '100%';
+        // canvas.style.height = '100%';
+    }
+  }, [segmentedMasks, stagingMasks, uploadedImageUrl, selectedColor, imageDimensions, hoveredMaskId]); // Add hoveredMaskId to dependency array
+
+  const handleRecolorMask = async (maskId: string) => {
+    const maskToRecolor = segmentedMasks.find(m => m.id === maskId);
+    if (!maskToRecolor) {
+      setError("Mask not found for recoloring.");
+      return;
+    }
+    if (!uploadedImageName) {
+      setError("Uploaded image name not found. Please upload again.")
+      return;
+    }
+    if (!maskToRecolor.segmentation || maskToRecolor.segmentation.length === 0) {
+      setError("Mask data is empty or invalid for recoloring.");
+      return;
+    }
+
+    console.log(`Attempting to recolor mask ${maskId} of image ${uploadedImageName} with ${selectedColor}`);
+    setIsRecoloring(true);
+    setError(null);
+
+    try {
+      const response = await axios.post('http://localhost:8000/recolor-image/', {
+        image_name: uploadedImageName,
+        mask: maskToRecolor.segmentation, // Send the raw boolean mask data
+        target_hex_color: selectedColor,
+      });
+
+      console.log('Recoloring API response:', response.data);
+
+      // Update the mask's color in the state for visual feedback on the list item
+      setSegmentedMasks(prevMasks => 
         prevMasks.map(m => m.id === maskId ? {...m, color: selectedColor} : m)
-    );
+      );
+
+      // Force a reload of the displayed image from the server to show the backend changes
+      // uploadedImageUrl should now be the direct server URL
+      if (uploadedImageUrl) { 
+        const baseUrl = uploadedImageUrl.split('?')[0];
+        setUploadedImageUrl(`${baseUrl}?t=${new Date().getTime()}`);
+        console.log("Refreshing image from server:", `${baseUrl}?t=${new Date().getTime()}`);
+      }
+      setError(null); // Clear any previous errors
+
+    } catch (err) {
+      console.error('Recoloring error:', err);
+      handleApiError(err, 'recolor'); // New error type 'recolor'
+    } finally {
+      setIsRecoloring(false);
+    }
   };
 
   const handleColorChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -359,6 +527,28 @@ export default function HomePage() {
     return { position: 'absolute', left: `${finalDotLeft}px`, top: `${finalDotTop}px` };
   };
 
+  const handleSelectStagingMask = (maskIdToSelect: string) => {
+    const selectedMask = stagingMasks.find(m => m.id === maskIdToSelect);
+    if (selectedMask) {
+      // Add the selected mask to final masks, potentially with the current global selectedColor as a default
+      setSegmentedMasks(prev => [...prev, { ...selectedMask, color: selectedMask.color || selectedColor }]);
+      setStagingMasks([]); // Clear all staging masks
+      setCurrentPrompts([]); // Clear current prompts
+      setCurrentPromptGroupId(null); // Reset group ID
+      pointIdCounter = 0; // Reset point counter for next set of prompts
+      console.log("Staging mask selected and finalized:", selectedMask.id);
+    }
+  };
+
+  const handleDiscardStagingGroup = () => {
+    console.log("Discarding current staging group:", currentPromptGroupId);
+    setStagingMasks([]); // Clear all staging masks
+    // Optionally, clear currentPrompts if you want to force user to start new points after discarding
+    // setCurrentPrompts([]); 
+    // pointIdCounter = 0;
+    setCurrentPromptGroupId(null);
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-4 md:p-8">
       <header className="w-full max-w-4xl mb-8 md:mb-12 text-center">
@@ -366,7 +556,7 @@ export default function HomePage() {
           Gunpla Interactive Colorizer
         </h1>
         <p className="text-lg md:text-xl text-gray-300 mt-3 md:mt-4">
-          Upload image, click a part, pick a color, and see it transform!
+          Upload image, click points, generate mask, pick a color, and see it transform!
         </p>
       </header>
 
@@ -403,7 +593,7 @@ export default function HomePage() {
             {selectedImageFile && (
               <button
                 onClick={handleImageUpload}
-                disabled={isLoading || isSegmenting}
+                disabled={isLoading || isSegmenting || isRecoloring}
                 className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-4 md:px-6 rounded-lg transition-all duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
               >
                 {isLoading ? (
@@ -413,6 +603,14 @@ export default function HomePage() {
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
                     <span>Uploading...</span>
+                  </>
+                ) : isRecoloring ? (
+                  <>
+                    <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Recoloring...</span>
                   </>
                 ) : (
                   <>
@@ -424,12 +622,12 @@ export default function HomePage() {
                 )}
               </button>
             )}
-            {uploadedImageUrl && !isSegmenting && <p className="text-center text-sm text-green-400">Image uploaded! Click on the image to select a part.</p>}
-            {isSegmenting && <p className="text-center text-sm text-yellow-400">Segmenting part... please wait.</p>} 
+            {uploadedImageUrl && !isSegmenting && !isLoading && !isRecoloring && !currentPromptGroupId && <p className="text-center text-sm text-green-400">Image uploaded! Use Point Prompts, then Generate Mask. Then pick color and a mask to recolor.</p>}
+            {uploadedImageUrl && currentPromptGroupId && stagingMasks.length > 0 && <p className="text-center text-sm text-yellow-300">New masks generated! Please select one or discard.</p>}
 
             {error && <p className="text-red-400 bg-red-900 bg-opacity-30 p-3 rounded-md text-sm">{error}</p>}
             
-            {uploadedImageUrl && (
+            {uploadedImageUrl && !currentPromptGroupId && (
               <div className="mt-4 space-y-3 p-3 bg-gray-700 rounded-md">
                 <h3 className="text-md font-semibold text-purple-300">Point Prompts:</h3>
                 <div className="flex items-center space-x-4">
@@ -445,10 +643,18 @@ export default function HomePage() {
                 <p className="text-xs text-gray-400">Click on image to add {currentPromptLabel === 1 ? 'foreground' : 'background'} points.</p>
                 {currentPrompts.length > 0 && (
                   <div className="space-y-2">
-                    <button onClick={handleSegmentFromPoints} disabled={isSegmenting || isLoading} className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-150 disabled:opacity-50">
+                    <button 
+                      onClick={handleSegmentFromPoints} 
+                      disabled={isSegmenting || isLoading || isRecoloring || currentPrompts.length === 0}
+                      className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
                       {isSegmenting ? 'Segmenting...' : 'Generate Mask from Points'}
                     </button>
-                    <button onClick={handleClearCurrentPoints} disabled={isSegmenting || isLoading} className="w-full bg-yellow-600 hover:bg-yellow-700 text-black font-semibold py-2 px-4 rounded-lg transition-colors duration-150 disabled:opacity-50">
+                    <button 
+                      onClick={handleClearCurrentPoints} 
+                      disabled={isSegmenting || isLoading || isRecoloring}
+                      className="w-full bg-yellow-600 hover:bg-yellow-700 text-black font-semibold py-2 px-4 rounded-lg transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
                       Clear Current Points ({currentPrompts.length})
                     </button>
                   </div>
@@ -456,6 +662,42 @@ export default function HomePage() {
               </div>
             )}
 
+            {/* Staging Masks Section - visible if there are staging masks */} 
+            {currentPromptGroupId && stagingMasks.length > 0 && (
+              <div className="mt-6 space-y-3 p-3 bg-gray-700 border border-yellow-500 rounded-md">
+                <h3 className="text-md font-semibold text-yellow-300">New Mask Proposals ({stagingMasks.length}):</h3>
+                <p className="text-sm text-gray-400">Hover to preview a mask. Click "Select" to finalize one, or discard all.</p>
+                <div className="max-h-40 overflow-y-auto space-y-2 pr-2">
+                  {stagingMasks.map((mask) => (
+                    <div key={mask.id} 
+                      onMouseEnter={() => setHoveredMaskId(mask.id)}
+                      onMouseLeave={() => setHoveredMaskId(null)}
+                      className="p-2 rounded-md bg-gray-600 hover:bg-gray-500 flex justify-between items-center"
+                    >
+                      <span className="text-sm truncate" title={`Mask ID: ${mask.id}, Area: ${mask.area}px`}>
+                        Staging Mask (Area: {mask.area}px)
+                      </span>
+                      <button 
+                        onClick={() => handleSelectStagingMask(mask.id)}
+                        disabled={isLoading || isSegmenting || isRecoloring}
+                        className="ml-2 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold py-1 px-2 rounded-md transition-colors duration-150 disabled:opacity-50"
+                      >
+                        Select
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button 
+                  onClick={handleDiscardStagingGroup}
+                  disabled={isLoading || isSegmenting || isRecoloring}
+                  className="w-full bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-3 rounded-lg transition-colors duration-150 disabled:opacity-50 mt-2"
+                >
+                  Discard All These New Masks
+                </button>
+              </div>
+            )}
+
+            {/* Final Masks Section - visible if there are finalized/segmented masks */} 
             {segmentedMasks.length > 0 && (
               <div className="mt-6 space-y-3">
                 <h3 className="text-md font-semibold text-purple-300">Final Masks:</h3>
@@ -466,15 +708,23 @@ export default function HomePage() {
                 <p className="text-sm text-gray-400">Select a mask below to apply the chosen color. Or clear all final masks.</p>
                 <div className="max-h-48 overflow-y-auto space-y-2 pr-2">
                     {segmentedMasks.map((mask) => (
-                        <button key={mask.id} onClick={() => handleRecolorMask(mask.id)} 
-                          className="w-full text-left p-2 rounded-md hover:bg-purple-700 bg-gray-700 border border-gray-600 transition-colors duration-150 text-sm truncate" 
-                          title={`Mask ID: ${mask.id}, Area: ${mask.area}px`}
-                          style={{borderColor: mask.color || 'transparent'}} >
+                        <button key={mask.id} 
+                          onClick={() => handleRecolorMask(mask.id)} 
+                          onMouseEnter={() => setHoveredMaskId(mask.id)}
+                          onMouseLeave={() => setHoveredMaskId(null)}
+                          disabled={isRecoloring || isSegmenting || isLoading}
+                          className="w-full text-left p-2 rounded-md hover:bg-purple-700 bg-gray-700 border border-gray-600 transition-colors duration-150 text-sm truncate disabled:opacity-70 disabled:cursor-not-allowed" 
+                          title={`Mask ID: ${mask.id}, Area: ${mask.area}px. Click to recolor with selected color.`}
+                          style={{borderColor: mask.color || selectedColor, borderWidth: mask.color ? '2px' : '1px'}} >
                            Mask (Area: {mask.area}px) - ID: ...{mask.id.slice(-6)}
                         </button>
                     ))}
                 </div>
-                <button onClick={handleClearAllMasks} className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-300 ease-in-out disabled:opacity-50" disabled={isSegmenting || isLoading}>
+                <button 
+                  onClick={handleClearAllMasks} 
+                  disabled={isSegmenting || isLoading || isRecoloring}
+                  className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
+                >
                     Clear All Final Masks
                 </button>
               </div>
@@ -485,7 +735,7 @@ export default function HomePage() {
           <div 
             ref={imageDisplayRef} 
             className="relative w-full md:h-[calc(100vh-250px)] h-80 bg-gray-700 rounded-lg overflow-hidden flex justify-center items-center cursor-crosshair group" // Added group for child targeting
-            onClick={uploadedImageUrl && !isSegmenting && !isLoading ? handleAddPointOnClick : undefined}
+            onClick={uploadedImageUrl && !isSegmenting && !isLoading && !isRecoloring ? handleAddPointOnClick : undefined}
           >
             {uploadedImageUrl ? (
               <img 
@@ -504,13 +754,13 @@ export default function HomePage() {
                 className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none group-hover:opacity-90 transition-opacity duration-200" 
                 // Width and height attributes set by useEffect, style width/height also by useEffect based on imageRenderedSize
             />
-            {(isLoading || isSegmenting) && (
+            {(isLoading || isSegmenting || isRecoloring) && (
                 <div className="absolute inset-0 bg-gray-800 bg-opacity-75 flex flex-col justify-center items-center z-10">
                     <svg className="animate-spin h-10 w-10 text-purple-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    <p className="mt-2 text-lg">{isLoading ? 'Uploading...' : isSegmenting ? 'Segmenting...' : 'Processing...'}</p>
+                    <p className="mt-2 text-lg">{isLoading ? 'Uploading...' : isSegmenting ? 'Segmenting...' : isRecoloring ? 'Recoloring...' : 'Processing...'}</p>
                 </div>
             )}
             {/* Display all current points */} 
