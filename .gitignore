@@ -32,3 +32,6 @@ env/
 # OS specific
 .DS_Store
 Thumbs.db 
+
+# models
+models_checkpoints/
