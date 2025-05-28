@@ -9,10 +9,10 @@ from PIL import Image # Pillow for image opening
 # Determine the device to run the model on (GPU if available, otherwise CPU)
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 # Define the SAM model type we are using
-MODEL_TYPE = "vit_b"
+MODEL_TYPE = "vit_l"
 # Path to the downloaded SAM checkpoint
 # Assumes the checkpoint is in a 'models_checkpoints' directory at the same level as the 'app' directory
-SAM_CHECKPOINT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "models_checkpoints", "sam_vit_b_01ec64.pth")
+SAM_CHECKPOINT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "models_checkpoints", "sam_vit_l_0b3195.pth")
 
 # --- Global SAM Predictor --- 
 # Initialize SAM predictor as a global variable to load the model only once.

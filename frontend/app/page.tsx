@@ -10,9 +10,11 @@ interface Mask {
   segmentation: boolean[][]; // Raw mask data
   bbox: { x: number; y: number; width: number; height: number }; // Calculated BBox
   area: number;
-  id: number; // A unique ID we assign or get
+  id: string; // Changed to string for robust unique IDs (e.g., UUID or timestamp-based)
   color?: string; // For displaying the mask with a specific color
 }
+
+let maskIdCounter = 0; // Simple counter for unique mask IDs across multiple segmentations
 
 export default function HomePage() {
   const [selectedImageFile, setSelectedImageFile] = useState<File | null>(null);
@@ -40,10 +42,22 @@ export default function HomePage() {
     setClickPoint(null);
     setError(null);
     setImageDimensions(null);
+    maskIdCounter = 0; // Reset mask ID counter
     if (canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d');
       ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
+  };
+
+  const handleClearAllMasks = () => {
+    setSegmentedMasks([]);
+    setClickPoint(null); // Also clear the last click point if any
+    maskIdCounter = 0; // Reset counter though not strictly necessary if only clearing
+    if (canvasRef.current) { // Clear the canvas
+        const ctx = canvasRef.current.getContext('2d');
+        ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+    console.log("All masks cleared.");
   };
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -103,7 +117,7 @@ export default function HomePage() {
     setSegmentedMasks([]);
     setClickPoint(null);
     setImageDimensions(null); 
-    if (canvasRef.current) {
+    if (canvasRef.current && !segmentedMasks.length) {
         const ctx = canvasRef.current.getContext('2d');
         ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
@@ -118,6 +132,10 @@ export default function HomePage() {
         },
       });
       
+      if (uploadedImageName !== uploadResponse.data.image_name) { // If image name changes, it implies a new image
+        clearStateAfterNewUpload(); // Full clear for a new image
+        setPreviewUrl(URL.createObjectURL(selectedImageFile)); // Refresh preview for the new file
+      }
       setUploadedImageName(uploadResponse.data.image_name);
       setUploadedImageUrl(previewUrl); // Keep using the local preview URL for display
       setError(null);
@@ -209,7 +227,7 @@ export default function HomePage() {
       });
       const rawMasks = segmentationResponse.data.masks; 
       if (rawMasks && rawMasks.length > 0) {
-        const processedMasks: Mask[] = rawMasks.map((maskData: boolean[][], index: number) => {
+        const newProcessedMasks: Mask[] = rawMasks.map((maskData: boolean[][], index: number) => {
           let minX = Infinity, minY = Infinity, maxX = -1, maxY = -1; let area = 0;
           maskData.forEach((row, rIndex) => {
             row.forEach((pixel, cIndex) => {
@@ -221,13 +239,14 @@ export default function HomePage() {
             });
           });
           const bbox = (minX === Infinity) ? { x: 0, y: 0, width: 0, height: 0 } : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };       
-          return { id: index, segmentation: maskData, bbox: bbox, area: area };
+          maskIdCounter++; // Increment global ID counter
+          return { id: `mask-${Date.now()}-${maskIdCounter}`, segmentation: maskData, bbox: bbox, area: area, color: selectedColor };
         }).filter((mask: Mask) => mask.area > 0); 
-        setSegmentedMasks(processedMasks);
-        if (processedMasks.length === 0 && rawMasks.length > 0) setError("SAM returned masks, but they were all empty or too small after processing.")
-        else if (processedMasks.length === 0) setError("No valid masks found.")
+        setSegmentedMasks(prevMasks => [...prevMasks, ...newProcessedMasks]);
+        if (newProcessedMasks.length === 0 && rawMasks.length > 0) setError("SAM returned masks, but they were all empty or too small after processing.")
+        else if (newProcessedMasks.length === 0) setError("No new valid masks found for this point.")
       } else {
-        setError("No masks returned from SAM or an error occurred."); setSegmentedMasks([]);
+        setError("No masks returned from SAM or an error occurred for this point."); setSegmentedMasks([]);
       }
     } catch (err) {
       console.error('Segmentation error:', err); handleApiError(err, 'segmentation'); setSegmentedMasks([]);
@@ -273,7 +292,7 @@ export default function HomePage() {
     }
   }, [segmentedMasks, uploadedImageUrl, selectedColor, imageDimensions]);
 
-  const handleRecolorMask = (maskId: number) => {
+  const handleRecolorMask = (maskId: string) => {
     console.log(`Attempting to recolor mask ${maskId} with ${selectedColor}`);
     alert(`TODO: Implement recoloring for mask ${maskId} with color ${selectedColor}.\nThis will call a new backend endpoint.`);
     setSegmentedMasks(prevMasks => 
@@ -426,19 +445,27 @@ export default function HomePage() {
                     className="w-full h-10 p-1 bg-gray-700 border border-gray-600 rounded-lg cursor-pointer"
                   />
                 </div>
-                <p className="text-sm text-gray-400">Select a mask below to apply the chosen color.</p>
+                <p className="text-sm text-gray-400">Select a mask below to apply the chosen color. Or clear all masks.</p>
                 <div className="max-h-48 overflow-y-auto space-y-2 pr-2">
                     {segmentedMasks.map((mask) => (
                         <button 
                             key={mask.id} 
                             onClick={() => handleRecolorMask(mask.id)}
-                            className="w-full text-left p-2 rounded-md hover:bg-purple-700 bg-gray-700 border border-gray-600 transition-colors duration-150 text-sm"
+                            className="w-full text-left p-2 rounded-md hover:bg-purple-700 bg-gray-700 border border-gray-600 transition-colors duration-150 text-sm truncate"
+                            title={`Mask ID: ${mask.id}, Area: ${mask.area}px`}
                             style={{borderColor: mask.color || 'transparent'}}
                         >
-                           Mask {mask.id + 1} (Area: {mask.area}px)
+                           Mask (Area: {mask.area}px) - ID: ...{mask.id.slice(-6)}
                         </button>
                     ))}
                 </div>
+                <button 
+                    onClick={handleClearAllMasks}
+                    className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-300 ease-in-out disabled:opacity-50"
+                    disabled={isSegmenting || isLoading}
+                >
+                    Clear All Masks
+                </button>
               </div>
             )}
           </div>
