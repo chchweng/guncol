@@ -14,7 +14,15 @@ interface Mask {
   color?: string; // For displaying the mask with a specific color
 }
 
+interface PointPrompt {
+  x: number;
+  y: number;
+  label: 0 | 1; // 0 for background, 1 for foreground
+  id: string; // For unique key in React list
+}
+
 let maskIdCounter = 0; // Simple counter for unique mask IDs across multiple segmentations
+let pointIdCounter = 0;
 
 export default function HomePage() {
   const [selectedImageFile, setSelectedImageFile] = useState<File | null>(null);
@@ -27,7 +35,8 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
 
   const [segmentedMasks, setSegmentedMasks] = useState<Mask[]>([]);
-  const [clickPoint, setClickPoint] = useState<{x: number, y: number} | null>(null);
+  const [currentPrompts, setCurrentPrompts] = useState<PointPrompt[]>([]);
+  const [currentPromptLabel, setCurrentPromptLabel] = useState<0 | 1>(1); // Default to foreground
   const [imageDimensions, setImageDimensions] = useState<{width: number, height: number, naturalWidth: number, naturalHeight: number} | null>(null);
 
   const [selectedColor, setSelectedColor] = useState<string>('#00FF00'); // Default to green, like your screenshot example
@@ -35,14 +44,15 @@ export default function HomePage() {
   const imageRef = useRef<HTMLImageElement>(null); // Ref for the actual <img> element
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const clearStateAfterNewUpload = () => {
+  const resetImageState = () => {
     setUploadedImageUrl(null);
     setUploadedImageName(null);
     setSegmentedMasks([]);
-    setClickPoint(null);
+    setCurrentPrompts([]);
     setError(null);
     setImageDimensions(null);
-    maskIdCounter = 0; // Reset mask ID counter
+    maskIdCounter = 0;
+    pointIdCounter = 0;
     if (canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d');
       ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
@@ -51,13 +61,18 @@ export default function HomePage() {
 
   const handleClearAllMasks = () => {
     setSegmentedMasks([]);
-    setClickPoint(null); // Also clear the last click point if any
-    maskIdCounter = 0; // Reset counter though not strictly necessary if only clearing
-    if (canvasRef.current) { // Clear the canvas
+    if (canvasRef.current && imageRef.current) { // Clear canvas and redraw existing staged points if any
         const ctx = canvasRef.current.getContext('2d');
         ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        // No need to redraw points here, as they are separate DOM elements. Canvas only shows final masks.
     }
-    console.log("All masks cleared.");
+    console.log("All final masks cleared.");
+  };
+
+  const handleClearCurrentPoints = () => {
+    setCurrentPrompts([]);
+    pointIdCounter = 0; // Reset if needed, or use more robust IDs
+    console.log("Current points cleared.");
   };
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -65,7 +80,7 @@ export default function HomePage() {
       const file = event.target.files[0];
       setSelectedImageFile(file);
       setPreviewUrl(URL.createObjectURL(file));
-      clearStateAfterNewUpload();
+      resetImageState(); // Full reset for a new file
     }
   };
 
@@ -77,7 +92,7 @@ export default function HomePage() {
       if (file.type.startsWith('image/')) {
         setSelectedImageFile(file);
         setPreviewUrl(URL.createObjectURL(file));
-        clearStateAfterNewUpload();
+        resetImageState();
       } else {
         setError('Invalid file type. Please upload an image.');
       }
@@ -112,16 +127,13 @@ export default function HomePage() {
 
     setIsLoading(true);
     setError(null);
-    // Keep previewUrl, but clear other states that depend on a specific uploaded image
-    setUploadedImageName(null);
-    setSegmentedMasks([]);
-    setClickPoint(null);
-    setImageDimensions(null); 
-    if (canvasRef.current && !segmentedMasks.length) {
-        const ctx = canvasRef.current.getContext('2d');
-        ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    // If it's a re-upload of the same conceptual image, we might not want to clear everything.
+    // For simplicity now, clicking upload often implies starting fresh with that image file.
+    if (uploadedImageName !== selectedImageFile.name) {
+        resetImageState(); // Full reset if file name is different
+        setPreviewUrl(URL.createObjectURL(selectedImageFile)); // Update preview if it was a new selection
     }
-
+    
     const formData = new FormData();
     formData.append('file', selectedImageFile);
 
@@ -132,12 +144,8 @@ export default function HomePage() {
         },
       });
       
-      if (uploadedImageName !== uploadResponse.data.image_name) { // If image name changes, it implies a new image
-        clearStateAfterNewUpload(); // Full clear for a new image
-        setPreviewUrl(URL.createObjectURL(selectedImageFile)); // Refresh preview for the new file
-      }
       setUploadedImageName(uploadResponse.data.image_name);
-      setUploadedImageUrl(previewUrl); // Keep using the local preview URL for display
+      setUploadedImageUrl(previewUrl); // Use existing preview URL
       setError(null);
       console.log('Image uploaded:', uploadResponse.data.image_name);
 
@@ -151,9 +159,9 @@ export default function HomePage() {
     }
   };
 
-  const handleImageClick = async (event: MouseEvent<HTMLDivElement>) => {
+  const handleAddPointOnClick = (event: MouseEvent<HTMLDivElement>) => {
     if (!uploadedImageName || !imageRef.current || !imageDimensions || !imageDisplayRef.current) {
-      setError("Please upload an image and ensure it's loaded before selecting a point.");
+      setError("Please upload an image and ensure it's loaded before adding points.");
       return;
     }
 
@@ -213,17 +221,31 @@ export default function HomePage() {
     const finalX = Math.round(clickXOnRenderedContent * (naturalWidth / renderedImageContentWidth));
     const finalY = Math.round(clickYOnRenderedContent * (naturalHeight / renderedImageContentHeight));
     
-    const newPoint = { x: finalX, y: finalY };
-    setClickPoint(newPoint); 
-    console.log('Image click processed (natural coords for backend):', newPoint);
-    setError(null);
+    // Add the new point to currentPrompts list
+    pointIdCounter++;
+    const newPrompt: PointPrompt = { x: finalX, y: finalY, label: currentPromptLabel, id: `point-${Date.now()}-${pointIdCounter}` };
+    setCurrentPrompts(prevPrompts => [...prevPrompts, newPrompt]);
+    console.log('Point added:', newPrompt);
+  };
+
+  const handleSegmentFromPoints = async () => {
+    if (!uploadedImageName) {
+      setError("No image uploaded.");
+      return;
+    }
+    if (currentPrompts.length === 0) {
+      setError("Please add at least one point prompt.");
+      return;
+    }
+
     setIsSegmenting(true);
-    setSegmentedMasks([]); 
+    setError(null);
+    const pointsForApi = currentPrompts.map(p => ({ x: p.x, y: p.y, label: p.label }));
 
     try {
       const segmentationResponse = await axios.post('http://localhost:8000/segment-image/', {
         image_name: uploadedImageName,
-        prompts: [ { x: newPoint.x, y: newPoint.y, label: 1 } ]
+        prompts: pointsForApi 
       });
       const rawMasks = segmentationResponse.data.masks; 
       if (rawMasks && rawMasks.length > 0) {
@@ -243,13 +265,16 @@ export default function HomePage() {
           return { id: `mask-${Date.now()}-${maskIdCounter}`, segmentation: maskData, bbox: bbox, area: area, color: selectedColor };
         }).filter((mask: Mask) => mask.area > 0); 
         setSegmentedMasks(prevMasks => [...prevMasks, ...newProcessedMasks]);
-        if (newProcessedMasks.length === 0 && rawMasks.length > 0) setError("SAM returned masks, but they were all empty or too small after processing.")
-        else if (newProcessedMasks.length === 0) setError("No new valid masks found for this point.")
+        setCurrentPrompts([]); // Clear points after successful segmentation and mask addition
+        pointIdCounter = 0;
+
+        if (newProcessedMasks.length === 0) setError(rawMasks.length > 0 ? "SAM returned masks, but they were all empty/small." : "No new valid masks from points.")
       } else {
-        setError("No masks returned from SAM or an error occurred for this point."); setSegmentedMasks([]);
+        setError("No masks returned from SAM for these points.");
       }
     } catch (err) {
-      console.error('Segmentation error:', err); handleApiError(err, 'segmentation'); setSegmentedMasks([]);
+      console.error('Segmentation error:', err);
+      handleApiError(err, 'segmentation');
     } finally {
       setIsSegmenting(false);
     }
@@ -311,56 +336,27 @@ export default function HomePage() {
     return { r, g, b, a: Math.floor(alpha * 255) }; 
   };
 
-  const getClickPointVisualPosition = (): CSSProperties => {
-    if (!clickPoint || !imageRef.current || !imageDisplayRef.current) return { display: 'none' }; // clickPoint stores natural coords
-
-    const imgElement = imageRef.current;
-    const displayContainer = imageDisplayRef.current; // The positioning parent of the dot
-
-    // Position of the image element relative to the displayContainer (its parent for the dot)
-    const imgRect = imgElement.getBoundingClientRect();
-    const displayContainerRect = displayContainer.getBoundingClientRect();
+  const getVisualPointPosition = (point: PointPrompt): CSSProperties => {
+    if (!imageRef.current || !imageDisplayRef.current) return { display: 'none' }; 
+    const imgElement = imageRef.current; const displayContainer = imageDisplayRef.current; 
+    const imgRect = imgElement.getBoundingClientRect(); const displayContainerRect = displayContainer.getBoundingClientRect();
     const imgLeftOffsetInContainer = imgRect.left - displayContainerRect.left;
     const imgTopOffsetInContainer = imgRect.top - displayContainerRect.top;
-
-    // Dimensions of the rendered image content within the <img> tag
-    const { naturalWidth, naturalHeight } = imgElement;
-    const imgDisplayWidth = imgElement.offsetWidth;  // actual width of <img> tag
-    const imgDisplayHeight = imgElement.offsetHeight; // actual height of <img> tag
-
-    const naturalAspectRatio = naturalWidth / naturalHeight;
-    const imgDisplayAspectRatio = imgDisplayWidth / imgDisplayHeight;
-
-    let contentRenderedWidth, contentRenderedHeight;
-    let contentPaddingX, contentPaddingY; // Padding within the <img> tag itself
-
-    if (naturalAspectRatio > imgDisplayAspectRatio) { // Image content is letterboxed vertically within <img>
-        contentRenderedWidth = imgDisplayWidth;
-        contentRenderedHeight = imgDisplayWidth / naturalAspectRatio;
-        contentPaddingX = 0;
-        contentPaddingY = (imgDisplayHeight - contentRenderedHeight) / 2;
-    } else { // Image content is pillarboxed horizontally within <img> or fits perfectly
-        contentRenderedHeight = imgDisplayHeight;
-        contentRenderedWidth = imgDisplayHeight * naturalAspectRatio;
-        contentPaddingX = (imgDisplayWidth - contentRenderedWidth) / 2;
-        contentPaddingY = 0;
+    const { naturalWidth, naturalHeight } = imgElement; const imgDisplayWidth = imgElement.offsetWidth; const imgDisplayHeight = imgElement.offsetHeight;
+    const naturalAspectRatio = naturalWidth / naturalHeight; const imgDisplayAspectRatio = imgDisplayWidth / imgDisplayHeight;
+    let contentRenderedWidth, contentRenderedHeight; let contentPaddingX, contentPaddingY; 
+    if (naturalAspectRatio > imgDisplayAspectRatio) { 
+        contentRenderedWidth = imgDisplayWidth; contentRenderedHeight = imgDisplayWidth / naturalAspectRatio;
+        contentPaddingX = 0; contentPaddingY = (imgDisplayHeight - contentRenderedHeight) / 2;
+    } else { 
+        contentRenderedHeight = imgDisplayHeight; contentRenderedWidth = imgDisplayHeight * naturalAspectRatio;
+        contentPaddingX = (imgDisplayWidth - contentRenderedWidth) / 2; contentPaddingY = 0;
     }
-
-    // Scale the natural clickPoint coordinates down to the rendered content's dimensions
-    const clickXOnRenderedContent = (clickPoint.x / naturalWidth) * contentRenderedWidth;
-    const clickYOnRenderedContent = (clickPoint.y / naturalHeight) * contentRenderedHeight;
-
-    // Calculate the dot's final top-left position relative to the displayContainer
-    // This needs to be the top-left of the img tag within its container, plus padding within img tag, plus scaled click pos
+    const clickXOnRenderedContent = (point.x / naturalWidth) * contentRenderedWidth;
+    const clickYOnRenderedContent = (point.y / naturalHeight) * contentRenderedHeight;
     const finalDotLeft = imgLeftOffsetInContainer + contentPaddingX + clickXOnRenderedContent;
     const finalDotTop = imgTopOffsetInContainer + contentPaddingY + clickYOnRenderedContent;
-
-    return {
-        position: 'absolute',
-        left: `${finalDotLeft}px`,
-        top: `${finalDotTop}px`,
-        // The transform -translate-x-1/2 -translate-y-1/2 will center the dot on this point
-    };
+    return { position: 'absolute', left: `${finalDotLeft}px`, top: `${finalDotTop}px` };
   };
 
   return (
@@ -433,38 +429,53 @@ export default function HomePage() {
 
             {error && <p className="text-red-400 bg-red-900 bg-opacity-30 p-3 rounded-md text-sm">{error}</p>}
             
+            {uploadedImageUrl && (
+              <div className="mt-4 space-y-3 p-3 bg-gray-700 rounded-md">
+                <h3 className="text-md font-semibold text-purple-300">Point Prompts:</h3>
+                <div className="flex items-center space-x-4">
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input type="radio" name="promptType" value={1} checked={currentPromptLabel === 1} onChange={() => setCurrentPromptLabel(1)} className="form-radio text-green-500 bg-gray-600 border-gray-500 focus:ring-green-500"/>
+                    <span className="text-green-400">Foreground (+)</span>
+                  </label>
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input type="radio" name="promptType" value={0} checked={currentPromptLabel === 0} onChange={() => setCurrentPromptLabel(0)} className="form-radio text-red-500 bg-gray-600 border-gray-500 focus:ring-red-500"/>
+                    <span className="text-red-400">Background (-)</span>
+                  </label>
+                </div>
+                <p className="text-xs text-gray-400">Click on image to add {currentPromptLabel === 1 ? 'foreground' : 'background'} points.</p>
+                {currentPrompts.length > 0 && (
+                  <div className="space-y-2">
+                    <button onClick={handleSegmentFromPoints} disabled={isSegmenting || isLoading} className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-150 disabled:opacity-50">
+                      {isSegmenting ? 'Segmenting...' : 'Generate Mask from Points'}
+                    </button>
+                    <button onClick={handleClearCurrentPoints} disabled={isSegmenting || isLoading} className="w-full bg-yellow-600 hover:bg-yellow-700 text-black font-semibold py-2 px-4 rounded-lg transition-colors duration-150 disabled:opacity-50">
+                      Clear Current Points ({currentPrompts.length})
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {segmentedMasks.length > 0 && (
               <div className="mt-6 space-y-3">
+                <h3 className="text-md font-semibold text-purple-300">Final Masks:</h3>
                 <div>
                   <label htmlFor="colorPicker" className="block text-md font-medium text-gray-300 mb-1">Recolor With:</label>
-                  <input 
-                    type="color" 
-                    id="colorPicker"
-                    value={selectedColor}
-                    onChange={handleColorChange}
-                    className="w-full h-10 p-1 bg-gray-700 border border-gray-600 rounded-lg cursor-pointer"
-                  />
+                  <input type="color" id="colorPicker" value={selectedColor} onChange={handleColorChange} className="w-full h-10 p-1 bg-gray-700 border border-gray-600 rounded-lg cursor-pointer"/>
                 </div>
-                <p className="text-sm text-gray-400">Select a mask below to apply the chosen color. Or clear all masks.</p>
+                <p className="text-sm text-gray-400">Select a mask below to apply the chosen color. Or clear all final masks.</p>
                 <div className="max-h-48 overflow-y-auto space-y-2 pr-2">
                     {segmentedMasks.map((mask) => (
-                        <button 
-                            key={mask.id} 
-                            onClick={() => handleRecolorMask(mask.id)}
-                            className="w-full text-left p-2 rounded-md hover:bg-purple-700 bg-gray-700 border border-gray-600 transition-colors duration-150 text-sm truncate"
-                            title={`Mask ID: ${mask.id}, Area: ${mask.area}px`}
-                            style={{borderColor: mask.color || 'transparent'}}
-                        >
+                        <button key={mask.id} onClick={() => handleRecolorMask(mask.id)} 
+                          className="w-full text-left p-2 rounded-md hover:bg-purple-700 bg-gray-700 border border-gray-600 transition-colors duration-150 text-sm truncate" 
+                          title={`Mask ID: ${mask.id}, Area: ${mask.area}px`}
+                          style={{borderColor: mask.color || 'transparent'}} >
                            Mask (Area: {mask.area}px) - ID: ...{mask.id.slice(-6)}
                         </button>
                     ))}
                 </div>
-                <button 
-                    onClick={handleClearAllMasks}
-                    className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-300 ease-in-out disabled:opacity-50"
-                    disabled={isSegmenting || isLoading}
-                >
-                    Clear All Masks
+                <button onClick={handleClearAllMasks} className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors duration-300 ease-in-out disabled:opacity-50" disabled={isSegmenting || isLoading}>
+                    Clear All Final Masks
                 </button>
               </div>
             )}
@@ -474,7 +485,7 @@ export default function HomePage() {
           <div 
             ref={imageDisplayRef} 
             className="relative w-full md:h-[calc(100vh-250px)] h-80 bg-gray-700 rounded-lg overflow-hidden flex justify-center items-center cursor-crosshair group" // Added group for child targeting
-            onClick={uploadedImageUrl && !isSegmenting && !isLoading ? handleImageClick : undefined}
+            onClick={uploadedImageUrl && !isSegmenting && !isLoading ? handleAddPointOnClick : undefined}
           >
             {uploadedImageUrl ? (
               <img 
@@ -502,12 +513,12 @@ export default function HomePage() {
                     <p className="mt-2 text-lg">{isLoading ? 'Uploading...' : isSegmenting ? 'Segmenting...' : 'Processing...'}</p>
                 </div>
             )}
-            {clickPoint && imageDimensions && (
-                <div 
-                    className="absolute rounded-full w-3 h-3 bg-red-500 border-2 border-white pointer-events-none transform -translate-x-1/2 -translate-y-1/2 z-20"
-                    style={getClickPointVisualPosition() as CSSProperties}
-                />
-            )}
+            {/* Display all current points */} 
+            {currentPrompts.map(point => (
+              <div key={point.id}
+                className={`absolute rounded-full w-2.5 h-2.5 border-2 border-white pointer-events-none transform -translate-x-1/2 -translate-y-1/2 z-20 ${point.label === 1 ? 'bg-green-500' : 'bg-red-500'}`}
+                style={getVisualPointPosition(point) as CSSProperties} />
+            ))}
           </div>
         </div>
       </main>
