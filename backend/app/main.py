@@ -6,6 +6,7 @@ import os
 import numpy as np # For handling mask data
 from pydantic import BaseModel # For request body validation
 from typing import List, Any # Any for the raw mask data for now
+import cv2
 
 # Import the SAM service and its loader
 from .services.segmentation_service import load_sam_model, get_image_segmentation_masks, SAM_CHECKPOINT_PATH, MODEL_TYPE, DEVICE, SAM_PREDICTOR
@@ -77,19 +78,34 @@ async def upload_image(file: UploadFile = File(...)):
     more permanently (e.g., in a cloud storage bucket).
     """
     # Sanitize filename to prevent directory traversal issues
-    filename = os.path.basename(str(file.filename)) 
-    if not filename: # Handle cases where filename might be empty or invalid
-        raise HTTPException(status_code=400, detail="Invalid filename.")
+    original_filename = os.path.basename(str(file.filename))
+    if not original_filename: 
+        raise HTTPException(status_code=400, detail="Invalid original filename.")
 
-    file_location = os.path.join(UPLOAD_DIR, filename)
+    # Create a new filename with .png extension
+    filename_stem = os.path.splitext(original_filename)[0]
+    new_png_filename = f"{filename_stem}.png"
+    
+    file_location = os.path.join(UPLOAD_DIR, new_png_filename)
+
     try:
-        with open(file_location, "wb+") as file_object:
-            shutil.copyfileobj(file.file, file_object)
-        return {"info": f"File '{filename}' saved at '{file_location}'", "image_name": filename}
+        # Read the uploaded file in-memory
+        contents = await file.read()
+        img_array = np.frombuffer(contents, np.uint8)
+        img_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        if img_bgr is None:
+            raise HTTPException(status_code=400, detail=f"Could not decode image file: {original_filename}. Ensure it is a valid image format.")
+
+        # Save the image as PNG
+        cv2.imwrite(file_location, img_bgr)
+        
+        return {"info": f"File '{original_filename}' processed and saved as '{new_png_filename}'", "image_name": new_png_filename}
+    except HTTPException as http_exc: # Re-raise HTTPExceptions directly
+        raise http_exc
     except Exception as e:
-        # Log the exception for debugging
-        print(f"Error saving uploaded file {filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Could not save file: {e}")
+        print(f"Error processing/saving uploaded file {original_filename} as PNG: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not process/save file as PNG: {e}")
 
 @app.post("/segment-image/")
 async def segment_image_endpoint(request: SegmentationRequest):
