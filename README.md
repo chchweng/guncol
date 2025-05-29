@@ -26,10 +26,27 @@ Perfect for Gunpla builders, hobbyists, and anyone looking to experiment with co
 
 ## 🚀 Live Demo
 
-**(Suggestion: Record a short GIF or video showcasing the workflow: upload -> click points -> generate masks -> select a staging mask -> pick color -> recolor -> download. Embed it here!)**
+Here's a glimpse of the Gunpla Interactive Colorizer in action:
 
-Example:
-`![Gunpla Colorizer Demo GIF](link_to_your_demo_image.gif)`
+**1. Upload Your Gunpla Image:**
+Simply drag & drop or select your image file.
+
+`![Step 1: Upload Image](assets/demo-step1-upload.png)` 
+*(Screenshot showing the initial UI with the image upload area)*
+
+**2. Interactive Point Prompting & Mask Generation:**
+Click foreground (+) and background (-) points. The AI generates mask proposals for you to choose from. The yellow highlighted areas are previews of the generated masks upon hovering.
+
+`![Step 2: Point Prompting & Mask Proposals](assets/demo-step2-prompting.png)` 
+*(Screenshot showing points placed on the Gunpla and the "New Mask Proposals" section with hover previews)*
+
+**3. Recolor and Finalize:**
+Select a mask, pick your desired color, and see your Gunpla transform! The chosen color (pink in this example) is applied to the selected chest piece.
+
+`![Step 3: Recolor Mask](assets/demo-step3-recoloring.png)` 
+*(Screenshot showing a part of the Gunpla recolored and the "Final Masks" list)*
+
+<!-- **(Suggestion: For an even better demo, consider recording a short GIF or video showcasing the entire workflow and replacing the static images above!)** -->
 
 ## 🛠️ Tech Stack
 
