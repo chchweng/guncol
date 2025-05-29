@@ -2,10 +2,11 @@
 
 **Transform your Gunpla models with the power of AI! Upload an image, segment parts with interactive clicks, and recolor them realistically while preserving texture and lighting.**
 
-(Note: This project was developed using Cursor, an AI-powered coding editor. Many parts of the code were generated or assisted by AI tools.)
 Ever imagined your favorite Gundam in a custom color scheme? Gunpla Interactive Colorizer makes it easy and fun. Using the advanced Segment Anything Model (SAM), you can precisely select parts of your Gunpla kit from an image. Then, with a simple color picker, change its hue and saturation instantly, all while keeping the original details and shadows intact.
 
 Perfect for Gunpla builders, hobbyists, and anyone looking to experiment with color variations without touching a physical model!
+
+(Note: This project was developed using Cursor, an AI-powered coding editor. Many parts of the code were generated or assisted by AI tools.)
 
 ## ✨ Features
 
